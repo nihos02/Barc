@@ -1,0 +1,366 @@
+package com.barclaycardus.dynamicurl.service.impl;
+
+import com.barclaycardus.digital.masking.MaskingUtil;
+import com.barclaycardus.dynamicurl.constant.enums.ServiceErrorCodes;
+import com.barclaycardus.dynamicurl.dynamodb.mapper.DynamoDbUrlInformationMapper;
+import com.barclaycardus.dynamicurl.entity.DynamoDbUrlInformation;
+import com.barclaycardus.dynamicurl.exception.GenerateURLValidationException;
+import com.barclaycardus.dynamicurl.exception.InvalidRequestException;
+import com.barclaycardus.dynamicurl.exception.ResourceNotFoundException;
+import com.barclaycardus.dynamicurl.exception.UrlStateUpdateException;
+import com.barclaycardus.dynamicurl.model.GenerateUrlRequest;
+import com.barclaycardus.dynamicurl.model.GenerateUrlRequestData;
+import com.barclaycardus.dynamicurl.model.GenerateUrlResponseData;
+import com.barclaycardus.dynamicurl.model.OperationType;
+import com.barclaycardus.dynamicurl.model.URLInformationData;
+import com.barclaycardus.dynamicurl.model.UrlStateUpdateReqData;
+import com.barclaycardus.dynamicurl.model.UrlStateUpdateRequest;
+import com.barclaycardus.dynamicurl.model.UrlStatusEnum;
+import com.barclaycardus.dynamicurl.model.ValidateUrlResponseData;
+import com.barclaycardus.dynamicurl.model.ValidationResult;
+import com.barclaycardus.dynamicurl.processor.DynamoDbResponseProcessor;
+import com.barclaycardus.dynamicurl.repository.UrlDynamoDbRepository;
+import com.barclaycardus.dynamicurl.service.DynamoDbURLValidatorService;
+import com.barclaycardus.dynamicurl.service.DynamicUrlService;
+import com.barclaycardus.dynamicurl.service.factory.ServiceFactory;
+import org.apache.commons.collections.CollectionUtils;
+import org.owasp.encoder.Encode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Profile;
+import org.springframework.stereotype.Service;
+import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
+import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.Put;
+import software.amazon.awssdk.services.dynamodb.model.TransactWriteItem;
+import software.amazon.awssdk.services.dynamodb.model.TransactWriteItemsRequest;
+import software.amazon.awssdk.services.dynamodb.model.Update;
+
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeParseException;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+
+@Service
+@Profile("aws")
+public class DynamoDbDynamicUrlServiceImpl implements DynamicUrlService {
+
+  private static final Logger LOG = LoggerFactory.getLogger(DynamoDbDynamicUrlServiceImpl.class);
+
+  private static final String PK = "urlId";
+
+  private static final String ATTR_STATUS = "status";
+  private static final String ATTR_UPDATED_ON = "updatedOn";
+  private static final String ATTR_UPDATED_BY = "updatedBy";
+
+  private static final String ST = "#st";
+  private static final String INACTIVE = ":inactive";
+  private static final String ACTIVE = ":active";
+  private static final String NOW = ":now";
+  private static final String USER = ":user";
+
+  private static final Map<String, String> UPDATE_NAMES = Map.of(ST, ATTR_STATUS);
+
+  private static final String UPDATE_EXPR =
+    "SET " + ST + " = " + INACTIVE + ", " + ATTR_UPDATED_ON + " = " + NOW + ", " + ATTR_UPDATED_BY + " = " + USER;
+
+  private static final String UPDATE_COND = ST + " = " + ACTIVE;
+
+  private final DynamoDbClient dynamoDbClient;
+  private final UrlDynamoDbRepository repository;
+  private final DynamoDbDynamicUrlServiceHelper helper;
+  private final ServiceFactory factory;
+  private final DynamoDbResponseProcessor responseProcessor;
+  private final DynamoDbUrlInformationMapper urlMapper;
+
+  @Value("${aws.dynamodb.table-name}")
+  private String tableName;
+
+  // Constructor injection
+  public DynamoDbDynamicUrlServiceImpl(
+      DynamoDbClient dynamoDbClient,
+      UrlDynamoDbRepository repository,
+      DynamoDbDynamicUrlServiceHelper helper,
+      ServiceFactory factory,
+      DynamoDbResponseProcessor responseProcessor,
+      DynamoDbUrlInformationMapper urlMapper) {
+    this.dynamoDbClient = dynamoDbClient;
+    this.repository = repository;
+    this.helper = helper;
+    this.factory = factory;
+    this.responseProcessor = responseProcessor;
+    this.urlMapper = urlMapper;
+  }
+
+  @Override
+  public GenerateUrlResponseData generateUrl(
+    String correlationID,
+    String traceId,
+    String spanId,
+    GenerateUrlRequestData requestData,
+    String channelId,
+    String userId) {
+
+    GenerateUrlRequest request = requestData.getData();
+
+    validateRequestIfRequired(request);
+
+    String encodedUser = encode(userId);
+    String maskedContact = mask(request.getContact());
+
+    LOG.info("Generating URL for contact: {}", maskedContact);
+
+    List<DynamoDbUrlInformation> existingUrls = fetchExistingUrls(request);
+    DynamoDbUrlInformation prevActiveUrl = getActiveUrlIfValid(existingUrls, maskedContact);
+
+    DynamoDbUrlInformation newUrl = helper.generateNewUrl(request, userId, channelId, prevActiveUrl);
+
+    persistUrl(prevActiveUrl, newUrl, encodedUser);
+
+    LOG.info("URL generated successfully for contact: {}", maskedContact);
+    return responseProcessor.processGenerateURLResponse(newUrl);
+  }
+
+  @Override
+  public ValidateUrlResponseData validateUrl(String correlationID, String traceId, String spanId, String urlId) {
+    LOG.info("Validating URL Id: {}", encode(urlId));
+
+    DynamoDbUrlInformation url = getUrlOrThrow(urlId);
+    ValidationResult result = validateWithFactory(url, OperationType.VALIDATE_URL.name());
+
+    LOG.info("URL Id: {} isValid: {}", encode(urlId), result.isValid());
+    return responseProcessor.processValidateUrlResponse(result);
+  }
+
+  @Override
+  public URLInformationData getURLDetails(String correlationID, String traceId, String spanId, String urlId) {
+    LOG.info("Fetch URL details of urlId: {}", encode(urlId));
+
+    DynamoDbUrlInformation url = getUrlOrThrow(urlId);
+    return responseProcessor.processUrlDetailsResponse(url);
+  }
+
+  @Override
+  public URLInformationData getURLDetail(String correlationID, String traceId, String spanId, String urlId) {
+    LOG.info("Fetch URL details of urlId: {}", encode(urlId));
+
+    DynamoDbUrlInformation url = getUrlOrThrow(urlId);
+
+    URLInformationData data = responseProcessor.processUrlDetailsResponse(url);
+    data.getData().setUrlExpiry(String.valueOf(url.getExpireOn()));
+
+    return data;
+  }
+
+  @Override
+  public URLInformationData updateURLState(
+    String correlationID,
+    String traceId,
+    String spanId,
+    String urlId,
+    UrlStateUpdateReqData reqData,
+    String userId) {
+
+    LOG.info("Updating URL state for urlId: {}", encode(urlId));
+
+    DynamoDbUrlInformation url = getUrlOrThrow(urlId);
+    validateUrlStateUpdate(url);
+
+    UrlStateUpdateRequest request = reqData.getData();
+
+    DynamoDbUrlStateUpdateService service = (DynamoDbUrlStateUpdateService) factory.getService(request.getStateAttribute().name());
+    DynamoDbUrlInformation updated = service.updateUrlState(request, url, userId);
+
+    return responseProcessor.processUrlDetailsResponse(updated);
+  }
+
+  private void validateRequestIfRequired(GenerateUrlRequest request) {
+    if (shouldValidate(request)) {
+      validateRequestParams(request);
+    }
+  }
+
+  private boolean shouldValidate(GenerateUrlRequest request) {
+    return request.getJourneyCode() != null
+      && !(request.getJourneyCode().getValue().equalsIgnoreCase("texttolookup")
+      || request.getJourneyCode().getValue().equalsIgnoreCase("acq"));
+  }
+
+  private void validateRequestParams(GenerateUrlRequest request) {
+    validateField(request.getContact(), "Contact");
+    validateField(request.getPartnerCode(), "PartnerCode");
+
+    if (request.getContactType() == null) {
+      throwBadRequest("ContactType", request.getContact());
+    }
+
+    validateExpiry(request.getUrlExpiry(), request.getContact());
+    validateField(request.getPartnerOrgUUID(), "PartnerOrgUUID");
+  }
+
+  private void validateField(String value, String field) {
+    if (isNullOrEmpty(value)) {
+      throwBadRequest(field, value);
+    }
+  }
+
+  private void validateExpiry(String expiry, String contact) {
+    if (expiry == null || expiry.isEmpty()) {
+      return;
+    }
+
+    try {
+      Instant expiryTime = Timestamp.valueOf(expiry).toInstant();
+      if (expiryTime.isBefore(Instant.now())) {
+        throwBadRequest("UrlExpiry", contact);
+      }
+    } catch (DateTimeParseException | IllegalArgumentException e) {
+      throw new InvalidRequestException("Invalid expiry format", ServiceErrorCodes.BAD_REQUEST);
+    }
+  }
+
+  private List<DynamoDbUrlInformation> fetchExistingUrls(GenerateUrlRequest request) {
+    long startOfTodayEpochSeconds = Instant.now()
+      .atZone(ZoneId.systemDefault())
+      .toLocalDate()
+      .atStartOfDay(ZoneId.systemDefault())
+      .toEpochSecond();
+
+    return repository.findByContactAndJourneyCodeAndCreatedOn(
+      request.getContact(),
+      request.getJourneyCode().getValue(),
+      startOfTodayEpochSeconds,
+      Arrays.asList(
+        UrlStatusEnum.ADMIN_LOCKED.getValue(),
+        UrlStatusEnum.ACTIVE.getValue()));
+  }
+
+  private DynamoDbUrlInformation getActiveUrlIfValid(List<DynamoDbUrlInformation> urls, String maskedContact) {
+    if (CollectionUtils.isEmpty(urls)) {
+      return null;
+    }
+
+    DynamoDbURLValidatorService validator = factory.getService(OperationType.GENERATE_URL.name());
+    ValidationResult result = validator.validate(urls);
+
+    if (!result.isValid()) {
+      throw new GenerateURLValidationException(
+        "Url generation failed for contact: " + maskedContact,
+        ServiceErrorCodes.valueOf(result.getErrorCode()));
+    }
+
+    return urls.stream()
+      .filter(u -> UrlStatusEnum.ACTIVE.getValue().equals(u.getStatus()))
+      .findFirst()
+      .orElse(null);
+  }
+
+  private void persistUrl(DynamoDbUrlInformation prev, DynamoDbUrlInformation current, String userId) {
+    if (prev == null) {
+      repository.save(current);
+      return;
+    }
+    executeTransaction(prev, current, userId);
+  }
+
+  private void executeTransaction(DynamoDbUrlInformation prev, DynamoDbUrlInformation current, String userId) {
+    long now = Instant.now().getEpochSecond();
+
+    TransactWriteItemsRequest tx = TransactWriteItemsRequest.builder()
+      .transactItems(
+        buildUpdateItem(prev, userId, now),
+        buildPutItem(current))
+      .build();
+
+    dynamoDbClient.transactWriteItems(tx);
+  }
+
+  private TransactWriteItem buildUpdateItem(DynamoDbUrlInformation prev, String userId, long now) {
+    // Separated for clarity — each null check has its own log line
+    Objects.requireNonNull(prev, "Previous URL cannot be null");
+    LOG.debug("Building update item for urlId: {}", prev.getUrlId());
+
+    String prevId = Objects.requireNonNull(prev.getUrlId(), "Previous urlId cannot be null");
+
+    return TransactWriteItem.builder()
+      .update(Update.builder()
+        .tableName(tableName)
+        .key(Map.of(PK, s(prevId)))
+        .updateExpression(UPDATE_EXPR)
+        .conditionExpression(UPDATE_COND)
+        .expressionAttributeNames(UPDATE_NAMES)
+        .expressionAttributeValues(Map.of(
+          INACTIVE, s(UrlStatusEnum.INACTIVE.getValue()),
+          ACTIVE,   s(UrlStatusEnum.ACTIVE.getValue()),
+          NOW,      n(now),
+          USER,     s(userId)))
+        .build())
+      .build();
+  }
+
+  private TransactWriteItem buildPutItem(DynamoDbUrlInformation url) {
+    Map<String, AttributeValue> item = urlMapper.toItem(url);
+
+    return TransactWriteItem.builder()
+      .put(Put.builder()
+        .tableName(tableName)
+        .item(item)
+        .conditionExpression("attribute_not_exists(" + PK + ")")
+        .build())
+      .build();
+  }
+
+  private DynamoDbUrlInformation getUrlOrThrow(String urlId) {
+    DynamoDbUrlInformation url = repository.findByUrlId(urlId);
+    if (url == null) {
+      throw new ResourceNotFoundException("URL not found for urlId:" + urlId);
+    }
+    return url;
+  }
+
+  private ValidationResult validateWithFactory(DynamoDbUrlInformation url, String operation) {
+    DynamoDbURLValidatorService validator = factory.getService(operation);
+    return validator.validate(Collections.singletonList(url));
+  }
+
+  private void validateUrlStateUpdate(DynamoDbUrlInformation url) {
+    ValidationResult result = validateWithFactory(url, OperationType.URL_STATE_UPDATE.name());
+    if (!result.isValid()) {
+      throw new UrlStateUpdateException(
+        "Url state update failed",
+        ServiceErrorCodes.valueOf(result.getErrorCode()));
+    }
+  }
+
+  private String encode(String input) {
+    return Encode.forJava(input);
+  }
+
+  private String mask(String contact) {
+    return MaskingUtil.maskContactInfo(encode(contact));
+  }
+
+  private boolean isNullOrEmpty(String val) {
+    return val == null || val.isEmpty();
+  }
+
+  private void throwBadRequest(String field, String contact) {
+    throw new InvalidRequestException(
+      "Invalid " + field + " for contact: " + mask(contact),
+      ServiceErrorCodes.BAD_REQUEST);
+  }
+
+  private static AttributeValue s(String v) {
+    return AttributeValue.builder().s(v).build();
+  }
+
+  private static AttributeValue n(long v) {
+    return AttributeValue.builder().n(Long.toString(v)).build();
+  }
+}
