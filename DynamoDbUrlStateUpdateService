@@ -1,0 +1,28 @@
+package com.barclaycardus.dynamicurl.service.impl;
+
+import com.barclaycardus.dynamicurl.entity.DynamoDbUrlInformation;
+import com.barclaycardus.dynamicurl.model.UrlStateUpdateRequest;
+import com.barclaycardus.dynamicurl.repository.UrlDynamoDbRepository;
+import org.springframework.context.annotation.Profile;
+import org.springframework.stereotype.Component;
+
+@Component
+@Profile("aws")
+public abstract class DynamoDbUrlStateUpdateService {
+
+  protected final UrlDynamoDbRepository repository;
+
+  public DynamoDbUrlStateUpdateService(UrlDynamoDbRepository repository) {
+    this.repository = repository;
+  }
+
+  public DynamoDbUrlInformation save(DynamoDbUrlInformation urlInformation, String userId) {
+    urlInformation.setUpdatedBy(userId);
+    return repository.save(urlInformation);
+  }
+
+  public abstract DynamoDbUrlInformation updateUrlState(
+      UrlStateUpdateRequest urlStateUpdateRequest,
+      DynamoDbUrlInformation urlInformation,
+      String userId);
+}
