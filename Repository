@@ -1,0 +1,150 @@
+package com.barclaycardus.dynamicurl.repository;
+
+import com.barclaycardus.dynamicurl.entity.DynamoDbUrlInformation;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Profile;
+import org.springframework.stereotype.Repository;
+import software.amazon.awssdk.enhanced.dynamodb.DynamoDbEnhancedClient;
+import software.amazon.awssdk.enhanced.dynamodb.DynamoDbIndex;
+import software.amazon.awssdk.enhanced.dynamodb.DynamoDbTable;
+import software.amazon.awssdk.enhanced.dynamodb.Key;
+import software.amazon.awssdk.enhanced.dynamodb.TableSchema;
+import software.amazon.awssdk.enhanced.dynamodb.model.Page;
+import software.amazon.awssdk.enhanced.dynamodb.model.QueryConditional;
+import software.amazon.awssdk.enhanced.dynamodb.model.QueryEnhancedRequest;
+import software.amazon.awssdk.enhanced.dynamodb.model.UpdateItemEnhancedRequest;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Objects;
+import java.util.Set;
+
+@Repository
+@Profile("aws")
+public class UrlDynamoDbRepository {
+
+  private static final int MAX_WORKFLOW_QUERY_LIMIT = 20;
+  private static final int MAX_STATUS_QUERY_LIMIT = 10;
+  private static final int MAX_RESULTS = 10;
+
+  private final DynamoDbTable<DynamoDbUrlInformation> table;
+  private final DynamoDbIndex<DynamoDbUrlInformation> contactWorkflowIndex;
+  private final DynamoDbIndex<DynamoDbUrlInformation> contactStatusIndex;
+
+  public UrlDynamoDbRepository(
+    DynamoDbEnhancedClient client,
+    @Value("${aws.dynamodb.table-name}") String tableName,
+    @Value("${aws.dynamodb.index.contact-workflow}") String workflowIndexName,
+    @Value("${aws.dynamodb.index.contact-status}") String statusIndexName) {
+
+    this.table = client.table(tableName, TableSchema.fromBean(DynamoDbUrlInformation.class));
+    this.contactWorkflowIndex = table.index(workflowIndexName);
+    this.contactStatusIndex = table.index(statusIndexName);
+  }
+
+  public DynamoDbUrlInformation findByUrlId(String urlId) {
+    return table.getItem(Key.builder()
+      .partitionValue(urlId)
+      .build());
+  }
+
+  public List<DynamoDbUrlInformation> findByContactAndJourneyCodeAndCreatedOn(
+    String contact,
+    String workflowCode,
+    long startOfTodayEpochSeconds,
+    List<String> statuses) {
+
+    List<DynamoDbUrlInformation> results = new ArrayList<>();
+    Set<String> seen = new HashSet<>();
+
+    QueryEnhancedRequest workflowQuery = QueryEnhancedRequest.builder()
+      .queryConditional(QueryConditional.sortBeginsWith(
+        Key.builder()
+          .partitionValue(contact)
+          .sortValue(workflowCode)
+          .build()
+      ))
+      .scanIndexForward(false)
+      .limit(MAX_WORKFLOW_QUERY_LIMIT)
+      .build();
+
+    Iterator<Page<DynamoDbUrlInformation>> workflowPages =
+      contactWorkflowIndex.query(workflowQuery).iterator();
+
+    while (workflowPages.hasNext() && results.size() < MAX_RESULTS) {
+      for (DynamoDbUrlInformation item : workflowPages.next().items()) {
+        if (item.getCreatedOn() >= startOfTodayEpochSeconds) {
+          if (seen.add(item.getUrlId())) {
+            results.add(item);
+          }
+        }
+      }
+    }
+
+    for (String status : statuses) {
+
+      QueryEnhancedRequest statusQuery = QueryEnhancedRequest.builder()
+        .queryConditional(QueryConditional.sortBeginsWith(
+          Key.builder()
+            .partitionValue(contact)
+            .sortValue(status)
+            .build()
+        ))
+        .scanIndexForward(false)
+        .limit(MAX_STATUS_QUERY_LIMIT)
+        .build();
+
+      Iterator<Page<DynamoDbUrlInformation>> statusPages =
+        contactStatusIndex.query(statusQuery).iterator();
+
+      while (statusPages.hasNext() && results.size() < MAX_RESULTS) {
+        for (DynamoDbUrlInformation item : statusPages.next().items()) {
+          if (Objects.equals(item.getWorkflowCode(), workflowCode)) {
+            if (seen.add(item.getUrlId())) {
+              results.add(item);
+            }
+          }
+        }
+      }
+    }
+
+    return results;
+  }
+
+  public DynamoDbUrlInformation save(DynamoDbUrlInformation entity) {
+    table.putItem(entity);
+    return entity;
+  }
+
+  public void updateState(String urlId,
+                          String status,
+                          Integer accessCount,
+                          Integer failedCount,
+                          Long lockedUpto,
+                          Long updatedOn,
+                          String updatedBy) {
+
+    DynamoDbUrlInformation update = new DynamoDbUrlInformation();
+    update.setUrlId(urlId);
+    update.setStatus(status);
+    update.setUrlAccessCount(accessCount);
+    update.setUrlAccessFailedCount(failedCount);
+    update.setLockedUpto(lockedUpto);
+    update.setUpdatedOn(updatedOn);
+    update.setUpdatedBy(updatedBy);
+
+    if (status != null && updatedOn != null) {
+      update.setStatusCreatedOn(status + "#" + updatedOn);
+    }
+
+    UpdateItemEnhancedRequest<DynamoDbUrlInformation> request =
+      UpdateItemEnhancedRequest.builder(DynamoDbUrlInformation.class)
+        .item(update)
+        .ignoreNulls(true)
+        .build();
+
+    table.updateItem(request);
+  }
+}
