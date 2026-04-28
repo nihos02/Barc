@@ -1,0 +1,151 @@
+package com.barclaycardus.dynamicurl.service.impl;
+
+import com.barclaycardus.dynamicurl.configuration.UrlConfig;
+import com.barclaycardus.dynamicurl.configuration.Workflow;
+import com.barclaycardus.dynamicurl.entity.DynamoDbUrlInformation;
+import com.barclaycardus.dynamicurl.entity.UrlInformation;
+import com.barclaycardus.dynamicurl.exception.DynamicUrlServiceException;
+import com.barclaycardus.dynamicurl.model.Duration;
+import com.barclaycardus.dynamicurl.model.GenerateUrlRequest;
+import com.barclaycardus.dynamicurl.model.UrlStatusEnum;
+import com.barclaycardus.dynamicurl.processor.RequestProcessor;
+import com.barclaycardus.dynamicurl.service.URLKeyGenerator;
+import com.barclaycardus.dynamicurl.util.TimeUtil;
+import com.barclaycardus.dynamicurl.validator.UrlValidatorHelper;
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Profile;
+import org.springframework.stereotype.Component;
+
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Component
+@Profile("aws")
+public class DynamoDbDynamicUrlServiceHelper {
+
+  private final URLKeyGenerator urlKeyGenerator;
+  private final UrlConfig urlConfig;
+
+  private static final Logger LOG = LoggerFactory.getLogger(DynamicUrlServiceHelper.class);
+
+  public DynamoDbDynamicUrlServiceHelper(
+      URLKeyGenerator urlKeyGenerator,
+      UrlConfig urlConfig) {
+    this.urlKeyGenerator = urlKeyGenerator;
+    this.urlConfig = urlConfig;
+  }
+
+  public DynamoDbUrlInformation generateNewUrl(GenerateUrlRequest request,
+                                               String userId,
+                                               String channelId,
+                                               DynamoDbUrlInformation prevUrl) throws DynamicUrlServiceException {
+
+    long now = Instant.now().getEpochSecond();
+
+    DynamoDbUrlInformation urlInformation = RequestProcessor.convertRequestToDynamoDbUrlInformation(request);
+
+    String urlId = getUrlId(request.getContact(), request.getContactType().getValue());
+    String url = buildUrl(urlId, request);
+
+    urlInformation.setUrlId(urlId);
+    urlInformation.setUrl(url);
+
+    urlInformation.setCreatedOn(now);
+    urlInformation.setUpdatedOn(now);
+    urlInformation.setCreatedBy(channelId);
+    urlInformation.setUpdatedBy(userId);
+
+    urlInformation.setStatus(UrlStatusEnum.ACTIVE.getValue());
+
+    String workflowCode = request.getJourneyCode().getValue();
+    urlInformation.setWorkflowCode(workflowCode);
+
+    urlInformation.setWorkflowCreatedOn(workflowCode + "#" + now);
+    urlInformation.setStatusCreatedOn(urlInformation.getStatus() + "#" + now);
+
+    urlInformation.setExpireOn(getExpiry(request, now));
+
+    urlInformation.setUrlAccessCount(0);
+    urlInformation.setUrlAccessFailedCount(0);
+
+    if (prevUrl != null) {
+      setFailedAccessCountAndLockedTime(prevUrl, urlInformation);
+    }
+
+    urlInformation.setPartnerCode(request.getPartnerCode());
+
+    Workflow workflow = urlConfig.getWorkflow(workflowCode.toLowerCase());
+    urlInformation.setPartnerUUID(workflow.getPartnerUUID());
+
+    if (StringUtils.isEmpty(request.getPartnerCode())) {
+      urlInformation.setPartnerCode(workflow.getPartnerCode());
+    }
+
+    if (!(workflowCode.equalsIgnoreCase("texttolookup") ||
+      workflowCode.equalsIgnoreCase("acq"))) {
+      urlInformation.setPartnerUUID(request.getPartnerOrgUUID());
+    }
+
+    return urlInformation;
+  }
+
+  private void setFailedAccessCountAndLockedTime(DynamoDbUrlInformation prevUrl,
+                                                 DynamoDbUrlInformation urlInformation) {
+    urlInformation.setUrlAccessFailedCount(prevUrl.getUrlAccessFailedCount());
+
+    if (UrlValidatorHelper.isLockedDynamoDb(prevUrl)) {
+      urlInformation.setLockedUpto(prevUrl.getLockedUpto());
+    }
+  }
+
+  private String buildUrl(String urlId, GenerateUrlRequest request) {
+    Workflow workflow = urlConfig.getWorkflow(
+      request.getJourneyCode().getValue().toLowerCase());
+    return String.format(workflow.getUrlTemplate(), urlId);
+  }
+
+  private String getUrlId(String contact, String contactType)
+    throws DynamicUrlServiceException {
+    return urlKeyGenerator.generateUniqueKey(contact, contactType);
+  }
+
+  private long getExpiry(GenerateUrlRequest request, long now) {
+
+    String expiryString = request.getUrlExpiry();
+    String journeyCode = request.getJourneyCode().getValue();
+
+    Instant expiryInstant;
+
+    boolean isWorkflowDriven =
+      journeyCode.equalsIgnoreCase("acq")
+        || journeyCode.equalsIgnoreCase("texttolookup")
+        || (journeyCode.toLowerCase().contains("texttolookup") && expiryString == null);
+
+    if (isWorkflowDriven) {
+      Workflow workflow = urlConfig.getWorkflow(journeyCode.toLowerCase());
+      Duration duration = TimeUtil.getDuration(workflow, request.getContactType());
+      expiryInstant = Instant.ofEpochSecond(now)
+        .plus(duration.getTime(), duration.getUnit());
+    } else {
+      Timestamp ts = Timestamp.valueOf(expiryString);
+      expiryInstant = ts.toInstant();
+    }
+
+    return expiryInstant.getEpochSecond();
+  }
+
+  public Timestamp getLockedTime(String lockedUpto) {
+    Duration duration = TimeUtil.getDuration(lockedUpto);
+    return Timestamp.from(Instant.now().plus(duration.getTime(), duration.getUnit()));
+  }
+
+  public List<UrlInformation> getActiveUrls(List<UrlInformation> list) {
+    return list.stream()
+      .filter(u -> u.getStatus().equalsIgnoreCase(UrlStatusEnum.ACTIVE.getValue()))
+      .collect(Collectors.toList());
+  }
+}
