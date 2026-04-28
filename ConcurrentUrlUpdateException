@@ -1,0 +1,7 @@
+package com.barclaycardus.dynamicurl.exception;
+
+public class ConcurrentUrlUpdateException extends RuntimeException {
+    public ConcurrentUrlUpdateException(String message, Throwable cause) {
+        super(message, cause);
+    }
+}
