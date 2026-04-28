@@ -1,0 +1,150 @@
+package com.barclaycardus.dynamicurl.service.impl;
+
+import com.barclaycardus.dynamicurl.configuration.UrlConfig;
+import com.barclaycardus.dynamicurl.configuration.Workflow;
+import com.barclaycardus.dynamicurl.dynamodb.mapper.DynamoDbUrlInformationMapper;
+import com.barclaycardus.dynamicurl.entity.DynamoDbUrlInformation;
+import com.barclaycardus.dynamicurl.exception.ConcurrentUrlUpdateException;
+import com.barclaycardus.dynamicurl.model.UrlStateUpdateRequest;
+import com.barclaycardus.dynamicurl.repository.UrlDynamoDbRepository;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Profile;
+import org.springframework.stereotype.Service;
+import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
+import software.amazon.awssdk.services.dynamodb.model.ConditionalCheckFailedException;
+import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
+
+import java.util.HashMap;
+import java.util.Map;
+
+@Service("URL_ACCESS_STATE")
+@Profile("aws")
+public class DynamoDbUrlAccessStateService extends DynamoDbUrlStateUpdateService {
+
+  private final DynamoDbClient dynamoDbClient;
+  private final UrlConfig urlConfig;
+  private final DynamoDbDynamicUrlServiceHelper helper;
+  private final DynamoDbUrlInformationMapper urlMapper;
+
+  @Value("${aws.dynamodb.table-name}")
+  private String tableName;
+
+  public DynamoDbUrlAccessStateService(
+    DynamoDbClient dynamoDbClient,
+    UrlConfig urlConfig,
+    DynamoDbDynamicUrlServiceHelper helper,
+    DynamoDbUrlInformationMapper urlMapper,
+    UrlDynamoDbRepository repository) {
+
+    super(repository);
+    this.dynamoDbClient = dynamoDbClient;
+    this.urlConfig = urlConfig;
+    this.helper = helper;
+    this.urlMapper = urlMapper;
+  }
+
+  @Override
+  public DynamoDbUrlInformation updateUrlState(
+    UrlStateUpdateRequest request,
+    DynamoDbUrlInformation urlInformation,
+    String userId) {
+
+    String state = request.getStateAttributeValue();
+
+    long newAccessCount = safeLong(urlInformation.getUrlAccessCount()) + 1;
+
+    int failedCount = safeInt(urlInformation.getUrlAccessFailedCount());
+    Long lockedUpto = urlInformation.getLockedUpto();
+
+    if ("SUCCESS".equalsIgnoreCase(state)) {
+      failedCount = 0;
+      lockedUpto = null;
+    } else {
+      Workflow workflow = urlConfig.getWorkflow(urlInformation.getWorkflowCode().toLowerCase());
+
+      failedCount = failedCount + 1;
+
+      if (lockedUpto != null) {
+        failedCount = 1;
+        lockedUpto = null;
+      }
+
+      if (failedCount >= workflow.getMaxRetryAllowed()) {
+        lockedUpto = helper.getLockedTime(workflow.getLookedUpTo()).getTime();
+      }
+    }
+
+    updateDynamo(
+      urlInformation.getUrlId(),
+      newAccessCount,
+      failedCount,
+      lockedUpto,
+      urlInformation.getVersion() != null ? urlInformation.getVersion() : 0L
+    );
+
+    urlInformation.setUrlAccessCount((int) newAccessCount);
+    urlInformation.setUrlAccessFailedCount(failedCount);
+    urlInformation.setLockedUpto(lockedUpto);
+    Long currentVersion = urlInformation.getVersion() != null ? urlInformation.getVersion() : 0L;
+    urlInformation.setVersion(currentVersion + 1);
+
+    return urlInformation;
+  }
+
+  private void updateDynamo(String urlId,
+                            long accessCount,
+                            int failedCount,
+                            Long lockedUpto,
+                            Long version) {
+
+    Map<String, String> names = Map.of(
+      "#ac", "urlAccessCount",
+      "#fc", "urlAccessFailedCount",
+      "#ver", "version",
+      "#lu", "lockedUpto"
+    );
+
+    Map<String, software.amazon.awssdk.services.dynamodb.model.AttributeValue> values = new HashMap<>();
+    values.put(":accessCount", urlMapper.n(accessCount));
+    values.put(":failedCount", urlMapper.n(failedCount));
+    values.put(":newVersion", urlMapper.n(version + 1));
+    values.put(":currentVersion", urlMapper.n(version));
+
+    String updateExpr = "SET #ac = :accessCount, #fc = :failedCount, #ver = :newVersion";
+
+    if (lockedUpto != null) {
+      values.put(":lockedUpto", urlMapper.n(lockedUpto));
+      updateExpr = updateExpr + ", #lu = :lockedUpto";
+    } else {
+      updateExpr = updateExpr + " REMOVE #lu";
+    }
+
+    UpdateItemRequest req = UpdateItemRequest.builder()
+      .tableName(tableName)
+      .key(urlMapper.key(urlId))
+      .updateExpression(updateExpr)
+      .expressionAttributeNames(names)
+      .expressionAttributeValues(values)
+      .conditionExpression("#ver = :currentVersion")
+      .build();
+
+    try {
+      dynamoDbClient.updateItem(req);
+    } catch (ConditionalCheckFailedException e) {
+      throw new ConcurrentUrlUpdateException(
+          "Concurrent update detected for urlId: " + urlId, e);
+    }
+  }
+
+  private long safeLong(Long val) {
+    return val == null ? 0L : val;
+  }
+
+  private long safeLong(Integer val) {
+    return val == null ? 0L : val;
+  }
+
+  private int safeInt(Integer val) {
+    return val == null ? 0 : val;
+  }
+}
