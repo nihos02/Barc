@@ -1,0 +1,73 @@
+package com.barclaycardus.dynamicurl.entity;
+
+import lombok.Data;
+import org.springframework.context.annotation.Profile;
+import software.amazon.awssdk.enhanced.dynamodb.mapper.annotations.DynamoDbBean;
+import software.amazon.awssdk.enhanced.dynamodb.mapper.annotations.DynamoDbPartitionKey;
+import software.amazon.awssdk.enhanced.dynamodb.mapper.annotations.DynamoDbSecondaryPartitionKey;
+import software.amazon.awssdk.enhanced.dynamodb.mapper.annotations.DynamoDbSecondarySortKey;
+
+@Data
+@DynamoDbBean
+@Profile("aws")
+public class DynamoDbUrlInformation {
+
+  private String urlId;
+  private Long version = 0L;
+
+  private Long effectiveDate;
+  private String partnerCode;
+  private String partnerUUID;
+
+  private String contact;
+  private String contactType;
+
+  private String workflowCode;
+  private String url;
+
+  private Long expireOn;
+
+  private Integer urlAccessCount;
+  private String status;
+
+  private Long lockedUpto;
+  private Integer urlAccessFailedCount;
+
+  private String createdBy;
+  private Long createdOn;
+
+  private String updatedBy;
+  private Long updatedOn;
+
+  private String workflowCreatedOn;
+  private String statusCreatedOn;
+
+  @DynamoDbPartitionKey
+  public String getUrlId() {
+    return urlId;
+  }
+
+  @DynamoDbSecondaryPartitionKey(indexNames = {
+    "contact-createdOn-index",
+    "contact-workflow-createdOn-index",
+    "contact-status-createdOn-index"
+  })
+  public String getContact() {
+    return contact;
+  }
+
+  @DynamoDbSecondarySortKey(indexNames = "contact-createdOn-index")
+  public Long getCreatedOn() {
+    return createdOn;
+  }
+
+  @DynamoDbSecondarySortKey(indexNames = "contact-workflow-createdOn-index")
+  public String getWorkflowCreatedOn() {
+    return workflowCreatedOn;
+  }
+
+  @DynamoDbSecondarySortKey(indexNames = "contact-status-createdOn-index")
+  public String getStatusCreatedOn() {
+    return statusCreatedOn;
+  }
+}
