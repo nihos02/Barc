@@ -1,0 +1,36 @@
+/*
+ * Copyright (c) 2017 Barclays PLC.
+ * All rights reserved.
+ *
+ * This software is the confidential and proprietary information of Barclays PLC.
+ * ("Confidential Information").
+ *
+ * File: Configuration.java
+ * Created: Jan 22, 2020
+ */
+package com.barclaycardus.dynamicurl;
+
+import com.barclays.cobalt.kernel.oas.SpringOASApplication;
+import com.barclays.uscb.elm.configuration.EnableElmCredentialsProvider;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
+import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
+import org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration;
+import org.springframework.boot.autoconfigure.data.jpa.JpaRepositoriesAutoConfiguration;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.ComponentScan;
+
+@SpringOASApplication
+@EnableAutoConfiguration(exclude = {
+    DataSourceAutoConfiguration.class,
+    HibernateJpaAutoConfiguration.class,
+    JpaRepositoriesAutoConfiguration.class
+})
+@ComponentScan({"com.barclaycardus.dynamicurl.validator", "com.barclaycardus.dynamicurl"})
+@EnableConfigurationProperties
+@EnableElmCredentialsProvider
+public class Application {
+  public static void main(final String... args) {
+    SpringApplication.run(Application.class, args);
+  }
+}
