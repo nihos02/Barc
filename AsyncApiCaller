@@ -1,0 +1,184 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. REQUEST DTO
+// ─────────────────────────────────────────────────────────────────────────────
+package com.example.demo.dto;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
+import lombok.Builder;
+import lombok.Data;
+
+@Data
+@Builder
+public class DynamicUrlRequest {
+
+    @JsonProperty("data")
+    private RequestData data;
+
+    @Data
+    @Builder
+    public static class RequestData {
+        private String partnerCode;
+        private String contact;
+        private String contactType;
+        private String journeyCode;
+        private String urlExpiry;
+        private String partnerOrgUUID;
+    }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. ASYNC SERVICE  — fire-and-forget, logs response, caller doesn't wait
+// ─────────────────────────────────────────────────────────────────────────────
+package com.example.demo.service;
+
+import com.example.demo.dto.DynamicUrlRequest;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.*;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
+
+import java.util.concurrent.CompletableFuture;
+
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class DynamicUrlAsyncService {
+
+    private final RestTemplate restTemplate;
+
+    @Value("${dynamic.url.api.endpoint:http://localhost:9091/dynamicurlservices/url}")
+    private String apiEndpoint;
+
+    /**
+     * Fire-and-forget:
+     *  - @Async runs this in a separate thread pool
+     *  - Returns CompletableFuture<Void> so the caller can return immediately
+     *  - Response is logged; any exception is caught and logged (never bubbles up)
+     */
+    @Async("asyncTaskExecutor")
+    public CompletableFuture<Void> sendAndLogAsync(
+            DynamicUrlRequest request,
+            String correlationId,
+            String spanId,
+            String traceId) {
+
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.set("Correlation-ID",  correlationId);
+            headers.set("X-B3-SpanId",     spanId);
+            headers.set("X-B3-TraceId",    traceId);
+
+            HttpEntity<DynamicUrlRequest> entity = new HttpEntity<>(request, headers);
+
+            log.info("[ASYNC] Sending request to {} | correlationId={} traceId={}",
+                    apiEndpoint, correlationId, traceId);
+
+            ResponseEntity<String> response =
+                    restTemplate.exchange(apiEndpoint, HttpMethod.POST, entity, String.class);
+
+            log.info("[ASYNC] Response received | status={} correlationId={} body={}",
+                    response.getStatusCode(), correlationId, response.getBody());
+
+        } catch (Exception ex) {
+            log.error("[ASYNC] Call failed | correlationId={} error={}", correlationId, ex.getMessage(), ex);
+        }
+
+        return CompletableFuture.completedFuture(null);
+    }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. CONTROLLER  — returns 202 Accepted immediately; async work continues
+// ─────────────────────────────────────────────────────────────────────────────
+package com.example.demo.controller;
+
+import com.example.demo.dto.DynamicUrlRequest;
+import com.example.demo.service.DynamicUrlAsyncService;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+@Slf4j
+@RestController
+@RequestMapping("/trigger")
+@RequiredArgsConstructor
+public class TriggerController {
+
+    private final DynamicUrlAsyncService asyncService;
+
+    @PostMapping
+    public ResponseEntity<String> trigger(
+            @RequestBody DynamicUrlRequest request,
+            @RequestHeader(value = "Correlation-ID",  defaultValue = "N/A") String correlationId,
+            @RequestHeader(value = "X-B3-SpanId",     defaultValue = "N/A") String spanId,
+            @RequestHeader(value = "X-B3-TraceId",    defaultValue = "N/A") String traceId) {
+
+        log.info("[CONTROLLER] Received request, dispatching async call | correlationId={}", correlationId);
+
+        // Kick off async — returns immediately, caller is NOT blocked
+        asyncService.sendAndLogAsync(request, correlationId, spanId, traceId);
+
+        return ResponseEntity.accepted().body("Request accepted. Processing asynchronously.");
+    }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. CONFIGURATION — RestTemplate bean + thread pool for @Async
+// ─────────────────────────────────────────────────────────────────────────────
+package com.example.demo.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.annotation.EnableAsync;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.web.client.RestTemplate;
+
+import java.util.concurrent.Executor;
+
+@Configuration
+@EnableAsync   // ← MUST be present for @Async to work
+public class AppConfig {
+
+    /** Dedicated thread pool for async API calls */
+    @Bean(name = "asyncTaskExecutor")
+    public Executor asyncTaskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(5);       // always-alive threads
+        executor.setMaxPoolSize(20);       // burst capacity
+        executor.setQueueCapacity(100);    // queued tasks before rejection
+        executor.setThreadNamePrefix("async-api-");
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(30);
+        executor.initialize();
+        return executor;
+    }
+
+    @Bean
+    public RestTemplate restTemplate() {
+        return new RestTemplate();
+    }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. MAIN APPLICATION CLASS
+// ─────────────────────────────────────────────────────────────────────────────
+package com.example.demo;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class DemoApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(DemoApplication.class, args);
+    }
+}
