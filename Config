@@ -1,0 +1,31 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# application.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# below url belongs to AWS Endpoint
+dynamic.url.api.endpoint=http://localhost:9091/dynamicurlservices/url
+
+# Logging
+#logging.level.com.example.demo=DEBUG
+
+
+<!-- pom.xml (relevant dependencies only)                                    -->
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <!-- Lombok for @Slf4j, @Data, @Builder, @RequiredArgsConstructor -->
+    <dependency>
+        <groupId>org.projectlombok</groupId>
+        <artifactId>lombok</artifactId>
+        <optional>true</optional>
+    </dependency>
+
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-test</artifactId>
+        <scope>test</scope>
+    </dependency>
+</dependencies>
+
