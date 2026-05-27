@@ -1,0 +1,220 @@
+env: local
+
+spring:
+  application:
+    name: url-management-service-api
+  datasource:
+    url: jdbc:oracle:thin:@bcu2-12-pi-uat.intranet.barcapint.com:3521/djpr_svc
+    driver-class-name: oracle.jdbc.OracleDriver
+    username: ${DB_USERNAME:#{null}}
+    password: ${DB_PASSWORD:#{null}}
+    hikari:
+      initialization-fail-timeout: -1
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 60000
+      validation-timeout: 10000
+      leak-detection-threshold: 60000
+      idle-timeout: 300000
+      max-lifetime: 1800000
+
+  jackson:
+    serialization:
+      FAIL_ON_EMPTY_BEANS: false
+
+  jpa:
+    hibernate:
+      ddl-auto: none
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.Oracle12cDialect
+        format_sql: false
+        proc:
+          param_null_passing: true
+        jdbc:
+          time_zone: UTC
+    open-in-view: false
+
+  sql:
+    init:
+      mode: never
+
+  mvc:
+    throw-exception-if-no-handler-found: true
+
+  web:
+    resources:
+      add-mappings: false
+
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+server:
+  port: 8080
+  oauth2:
+    enabled: false
+  ssl:
+    enabled: false
+  shutdown: graceful
+
+basic-auth:
+  config:
+    enabled: false
+
+http:
+  session:
+    enabled: false
+
+info:
+  build:
+    artifact: 'url-management-service-api'
+    description: '@project.description@'
+    name: '@project.name@'
+    version: '1.0-SNAPSHOT'
+
+cobalt:
+  encryption:
+    enabled: false
+    keysDir: file:${project.build.directory}/classes/security/encryptionkeys
+    keyVersion: v1
+
+external:
+  service:
+    client:
+      ssl:
+        enabled: true
+        trustStore: classpath:certs/test.jks
+        trustStorePassword: ''
+        skipHostnameVerification: true
+      connection:
+        timeout: 6000
+        readTimeout: 60000
+
+decryption:
+  config:
+    enabled: true
+    locations: /cust/security/encryptionKey
+
+url-config:
+  workflows:
+    default:
+      urlTemplate: local-gap.barclaysus.com/servicing/lookup/%s
+      partnerCode: GAPINC
+      partnerUUID: 4bc4c716-ba68-4530-80a6-a17e43164faf
+      maxRetryAllowed: 4
+      maxUrlGenAllowed: 25
+      lookedUpTo: 2H
+      validity:
+        SMS: 15M
+        EMAIL: 14D
+
+    texttolookup:
+      urlTemplate: local-gap.barclaysus.com/servicing/lookup/%s
+      partnerCode: GAPINC
+      partnerUUID: 4bc4c716-ba68-4530-80a6-a17e43164faf
+      maxRetryAllowed: 4
+      maxUrlGenAllowed: 25
+      lookedUpTo: 2H
+      validity:
+        SMS: 15M
+        EMAIL: 14D
+
+    acq:
+      urlTemplate: local-gap.barclaysus.com/servicing/lookup/%s
+      partnerCode: GAPINC
+      partnerUUID: 4bc4c716-ba68-4530-80a6-a17e43164faf
+      maxRetryAllowed: 4
+      maxUrlGenAllowed: 25
+      lookedUpTo: 2H
+      validity:
+        SMS: 15M
+        EMAIL: 14D
+
+    acq_003:
+      urlTemplate: www.barclaysus.com/servicing/lookup/%s
+      partnerCode: 003
+      partnerUUID: 4bc4c716-ba68-4530-80a6-a17e43164faf
+      maxRetryAllowed: 4
+      maxUrlGenAllowed: 25
+      lookedUpTo: 2H
+      validity:
+        SMS: 15M
+        EMAIL: 14D
+
+    # Frontier Partner Configuration - FTF
+    frontier_ftf:
+      urlTemplate: www.barclaysus.com/servicing/lookup/%servicing%
+      partnerCode: FTF
+      partnerUUID: f8dd2535-46ab-30b5-a396-d3e9538c5551
+      maxRetryAllowed: 4
+      maxUrlGenAllowed: 25
+      lookedUpTo: 2H
+      validity:
+        SMS: 15M
+        EMAIL: 14D
+
+    # Frontier Partner Configuration - FTD
+    frontier_ftd:
+      urlTemplate: www.barclaysus.com/servicing/lookup/%servicing%
+      partnerCode: FTD
+      partnerUUID: f8dd2535-46ab-30b5-a396-d3e9538c5551
+      maxRetryAllowed: 4
+      maxUrlGenAllowed: 25
+      lookedUpTo: 2H
+      validity:
+        SMS: 15M
+        EMAIL: 14D
+
+    acq_jb:
+      urlTemplate: qa01-www.barclaycardus.com/servicing/lookup/%s
+      maxRetryAllowed: 4
+      maxUrlGenAllowed: 25
+      lookedUpTo: 2H
+
+    acq_gm:
+      urlTemplate: qa01-www.barclaycardus.com/servicing/lookup/%s
+      maxRetryAllowed: 4
+      maxUrlGenAllowed: 25
+      lookedUpTo: 2H
+
+    texttolookup_gm:
+      urlTemplate: qa01-www.barclaycardus.com/servicing/lookup/%s
+      maxRetryAllowed: 4
+      maxUrlGenAllowed: 25
+      lookedUpTo: 2H
+      validity:
+        SMS: 15M
+
+database:
+  jpr:
+    enableRollableCredentials: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics
+      base-path: /
+  endpoint:
+    health:
+      show-details: when-authorized
+      probes:
+        enabled: true
+  health:
+    livenessState:
+      enabled: true
+    readinessState:
+      enabled: true
+    db:
+      enabled: true
+
+logging:
+  level:
+    root: INFO
+    org.hibernate.SQL: INFO
+    org.hibernate.type.descriptor.sql.BasicBinder: INFO
+    com.barclaycardus.dynamicurl: INFO
+    com.zaxxer.hikari: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
